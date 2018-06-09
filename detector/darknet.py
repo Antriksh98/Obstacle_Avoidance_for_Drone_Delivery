@@ -1,12 +1,22 @@
+#https://blog.paperspace.com/how-to-implement-a-yolo-v3-object-detector-from-scratch-in-pytorch-part-2/
+#Use the link above for further assistance.
 from __future__ import division
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import variable
+from torch.autograd import Variable
 import numpy as np
+from util import *
 
-#cfgfile = '/home/antriksh/Documents/Antriksh/codes/avionics/detector/cf'g
+def get_test_input():
+    img = cv2.imread("dog-cycle-car.png")
+    img = cv2.resize(img, (416,416))          #Resize to the input dimension
+    img_ =  img[:,:,::-1].transpose((2,0,1))  # BGR -> RGB | H X W C -> C X H X W 
+    img_ = img_[np.newaxis,:,:,:]/255.0       #Add a channel at 0 (for batch) | Normalise
+    img_ = torch.from_numpy(img_).float()     #Convert to float
+    img_ = Variable(img_)                     # Convert to Variable
+    return img_
 
 def parse_cfg(cfgfile):
 	"""
@@ -17,7 +27,7 @@ def parse_cfg(cfgfile):
  	"""	
 
 	file = open(cfgfile, 'r')
-	lines = file.read().split('/n') # stores lines in a list
+	lines = file.read().split('\n') # stores lines in a list
 	lines = [x for x in lines if len(x)>0] # gets rid of empty lines
 	lines = [x for x in lines if x[0] != '#'] # gets rid of comments
 	lines = [x.rstrip().lstrip() for x in lines] # gets rid of fringe whitespaces
@@ -38,7 +48,7 @@ def parse_cfg(cfgfile):
 	blocks.append(block)
 
 	return blocks
-
+	
 class EmptyLayer(nn.Module):
     def __init__(self):
         super(EmptyLayer, self).__init__()
@@ -55,12 +65,8 @@ def create_modules(blocks):
 	prev_filters = 3
 	output_filters =[]
 
-	module = nn.Sequential()#If does not work remove it.
-	filters = 0 #If does not work remove it.
-
-	for index, x in enumerate(blocks[1: ]):
+	for index, x in enumerate(blocks[1:]):
 		module = nn.Sequential()
-
 		# Check the type of blocks
 		#Create a new module for the blocks
 		#append to module_list
@@ -77,8 +83,8 @@ def create_modules(blocks):
 
 			filters = int(x["filters"])
 			padding = int(x["pad"])
-			stride = int(x["stride"])
 			kernel_size = int(x["size"])
+			stride = int(x["stride"])
 
 			if padding:
 				pad = (kernel_size-1)//2
@@ -93,7 +99,7 @@ def create_modules(blocks):
 
 			if batch_normalize:
 				bn = nn.BatchNorm2d(filters)
-				module.add_module("conv_{0}".format(index), bn)
+				module.add_module("batch_norm_{0}".format(index), bn)
 
 			#Check the activation
 			#It is either Linear or a leaky ReLU for YOLO
@@ -139,7 +145,7 @@ def create_modules(blocks):
 			module.add_module("shortcut_{}".format(index), shortcut)
 
 		#Yolo is the detection layer
-		elif x["type"] == "yolo":
+		elif (x["type"] == "yolo"):
 			mask = x["mask"].split(",")
 			mask = [int(x) for x in mask]
 
@@ -151,16 +157,80 @@ def create_modules(blocks):
 			detection = DetectionLayer(anchors)
 			module.add_module("Detection_{}".format(index), detection)
 
-	module_list.append(module)
-	prev_filters = filters	
-	output_filters.append(filters)
+		module_list.append(module)
+		prev_filters = filters	
+		output_filters.append(filters)
 
 	return (net_info, module_list)	
 
-blocks = parse_cfg("cfg/yolov3.cfg")
-print(create_modules(blocks))
+#blocks = parse_cfg("cfg/yolov3.cfg")
+#print(create_modules(blocks))
 
-#https://blog.paperspace.com/how-to-implement-a-yolo-v3-object-detector-from-scratch-in-pytorch-part-2/
-#Use the link above for further assistance.
-# check lines 151, 62, 78, 152. These are the lines producing the error.
-#I have added line 58, 59 to solve the problem but this does not seem to work.
+class Darknet(nn.Module):
+    def __init__(self, cfgfile):
+        super(Darknet, self).__init__()
+        self.blocks = parse_cfg(cfgfile)
+        self.net_info, self.module_list = create_modules(self.blocks)
+
+def forward(self, x, CUDA):
+	modules = self.blocks[1:]
+	outputs = {} #We cache the outputs for the route layer.
+
+	write = 0
+	for i, module in enumerate(modules):
+		module_type = (module["type"])
+
+
+		if module_type == "convolutional" or module_type == "upsample":
+			x = self.module_list[i](x)
+
+		elif module_type == "route":
+			layers = module["layers"]
+			layers = [int(a) for a in layers]
+
+			if (layers[0]) > 0:
+				layers[0] = layers[0] - i
+
+			if len(layers) == 1:
+				x = outputs[i + (layers[0])]
+
+			else:
+				if (layers[1]) > 0:
+					layers[1] = layers[1] - i
+
+				map1 = outputs[i + layers[0]]
+				map2 = outputs[i + layers[1]]
+
+				x = torch.cat((map1, map2), 1)
+
+		elif module_type == "shortcut":
+			from_ = int(module["from"])
+			x = outputs[i-1] + outputs[i+from_]
+
+		elif module_type == 'yolo':
+
+			anchors = self.module_list[i][0].anchors
+			#Get the input dimensions
+			inp_dim = int(self.net_info["height"])
+
+			#Get the number of classes
+			num_classes = int(module["classes"])
+
+			#Transform
+			x = x.data
+			x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
+			if not write:
+				detections = x
+				write = 1
+
+			else:
+				detections = torch.cat((detections, x), 1)
+
+		outputs[i] = x
+
+	return detections
+
+model = Darknet("cfg/yolov3.cfg")
+inp = get_test_input()
+pred = model(inp, torch.cuda.is_available())
+print (pred)
